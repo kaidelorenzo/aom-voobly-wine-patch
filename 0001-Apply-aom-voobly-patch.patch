@@ -1,0 +1,123 @@
+From 8f8a559ce035d59290cb1724dbffbeff3088edd2 Mon Sep 17 00:00:00 2001
+From: Kai DeLorenzo <kaidelorenzo@users.noreply.github.com>
+Date: Fri, 8 Apr 2022 20:13:13 -0500
+Subject: [PATCH] Apply aom-voobly patch
+
+---
+ dlls/iphlpapi/iphlpapi.spec   |  1 +
+ dlls/iphlpapi/iphlpapi_main.c | 51 +++++++++++++++++++++++++++++++++++
+ dlls/ws2_32/socket.c          |  4 +--
+ include/iphlpapi.h            |  3 +++
+ 4 files changed, 57 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/iphlpapi/iphlpapi.spec b/dlls/iphlpapi/iphlpapi.spec
+index 90bf290c..27db0953 100644
+--- a/dlls/iphlpapi/iphlpapi.spec
++++ b/dlls/iphlpapi/iphlpapi.spec
+@@ -100,6 +100,7 @@
+ @ stdcall GetInterfaceInfo( ptr ptr )
+ #@ stub GetInvertedIfStackTable
+ @ stdcall GetIpAddrTable( ptr ptr long )
++@ stdcall GetIpAddrTable2( ptr ptr long )
+ @ stub GetIpAddrTableFromStack
+ #@ stub GetIpErrorString
+ #@ stub GetIpForwardEntry2
+diff --git a/dlls/iphlpapi/iphlpapi_main.c b/dlls/iphlpapi/iphlpapi_main.c
+index c94f869c..51d2e3cd 100644
+--- a/dlls/iphlpapi/iphlpapi_main.c
++++ b/dlls/iphlpapi/iphlpapi_main.c
+@@ -1989,6 +1989,57 @@ err:
+ }
+ 
+ 
++DWORD WINAPI GetIpAddrTable2( MIB_IPADDRTABLE *table, ULONG *size, BOOL sort )
++{
++    DWORD err, count, needed, i, loopback, row_num = 0;
++    struct nsi_ipv4_unicast_key *keys;
++    struct nsi_ip_unicast_rw *rw;
++
++    TRACE( "table %p, size %p, sort %d\n", table, size, sort );
++    if (!size) return ERROR_INVALID_PARAMETER;
++
++    err = NsiAllocateAndGetTable( 1, &NPI_MS_IPV4_MODULEID, NSI_IP_UNICAST_TABLE, (void **)&keys, sizeof(*keys),
++                                  (void **)&rw, sizeof(*rw), NULL, 0, NULL, 0, &count, 0 );
++    if (err) return err;
++
++    needed = FIELD_OFFSET( MIB_IPADDRTABLE, table[count] );
++
++    if (!table || *size < needed)
++    {
++        *size = needed;
++        err = ERROR_INSUFFICIENT_BUFFER;
++        goto err;
++    }
++
++    table->dwNumEntries = count;
++
++    for (loopback = 0; loopback < 2; loopback++) /* Move the loopback addresses to the end */
++    {
++        for (i = 0; i < count; i++)
++        {
++            MIB_IPADDRROW *row = table->table + row_num;
++
++            if (!!loopback != (keys[i].luid.Info.IfType == MIB_IF_TYPE_LOOPBACK)) continue;
++
++            row->dwAddr = keys[i].addr.s_addr;
++            ConvertInterfaceLuidToIndex( &keys[i].luid, &row->dwIndex );
++            ConvertLengthToIpv4Mask( rw[i].on_link_prefix, &row->dwMask );
++            row->dwBCastAddr = 1;
++            row->dwReasmSize = 0xffff;
++            row->unused1 = 0;
++            row->wType = MIB_IPADDR_PRIMARY;
++            row_num++;
++        }
++    }
++
++    if (sort) qsort( table->table, count, sizeof(MIB_IPADDRROW), ipaddrrow_cmp );
++err:
++    NsiFreeTable( keys, rw, NULL, NULL );
++
++    return err;
++}
++
++
+ /******************************************************************
+  *    AllocateAndGetIpAddrTableFromStack (IPHLPAPI.@)
+  *
+diff --git a/dlls/ws2_32/socket.c b/dlls/ws2_32/socket.c
+index fe7e4fb3..6cd66e72 100644
+--- a/dlls/ws2_32/socket.c
++++ b/dlls/ws2_32/socket.c
+@@ -2184,13 +2184,13 @@ INT WINAPI WSAIoctl(SOCKET s, DWORD code, LPVOID in_buff, DWORD in_size, LPVOID
+             return -1;
+         }
+         if (GetBestRoute( daddr_in->sin_addr.S_un.S_addr, 0, &row ) != NOERROR ||
+-            GetIpAddrTable( NULL, &size, FALSE ) != ERROR_INSUFFICIENT_BUFFER)
++            GetIpAddrTable2( NULL, &size, FALSE ) != ERROR_INSUFFICIENT_BUFFER)
+         {
+             SetLastError( WSAEFAULT );
+             return -1;
+         }
+         ipAddrTable = malloc( size );
+-        if (GetIpAddrTable( ipAddrTable, &size, FALSE ))
++        if (GetIpAddrTable2( ipAddrTable, &size, FALSE ))
+         {
+             free( ipAddrTable );
+             SetLastError( WSAEFAULT );
+diff --git a/include/iphlpapi.h b/include/iphlpapi.h
+index da5819c8..49f4e5b7 100644
+--- a/include/iphlpapi.h
++++ b/include/iphlpapi.h
+@@ -61,6 +61,9 @@ DWORD WINAPI GetIfTable(PMIB_IFTABLE pIfTable, PULONG pdwSize, BOOL bOrder);
+ DWORD WINAPI GetIpAddrTable(PMIB_IPADDRTABLE pIpAddrTable, PULONG pdwSize,
+  BOOL bOrder);
+ 
++DWORD WINAPI GetIpAddrTable2(PMIB_IPADDRTABLE pIpAddrTable, PULONG pdwSize,
++ BOOL bOrder);
++
+ DWORD WINAPI GetIpNetTable(PMIB_IPNETTABLE pIpNetTable, PULONG pdwSize,
+  BOOL bOrder);
+ 
+-- 
+2.35.1
+
